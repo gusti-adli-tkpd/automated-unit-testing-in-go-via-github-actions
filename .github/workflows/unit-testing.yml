@@ -1,0 +1,260 @@
+name: Unit Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:    
+      - '*'         # matches every branch that doesn't contain a '/'
+      - '*/*'       # matches every branch containing a single '/'
+      - '**'        # matches every branch
+      - '!main'     # excludes main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  code-coverage-merge:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [1.17]
+
+    steps:
+    - name: Git Checkout
+      uses: actions/checkout@v3
+
+    - name: Set up go      
+      uses: actions/setup-go@v2
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Install dependencies & build binary
+      run: |
+        go mod init github.com/gusti-adli-tkpd/automated-unit-testing-in-go-via-github-actions
+        go mod tidy
+        go build main/*.go
+        
+    - name: Unit Testing
+      continue-on-error: true
+      run: |
+        go test -coverprofile=cover.out -coverpkg=./... ./... && go tool cover -func=cover.out
+    
+    - name: Create Coverage Report
+      run: |
+        go tool cover -func=cover.out | tee merge-coverage-report.txt
+        
+    - name: Write unit test result to GITHUB actions artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: merge_coverage_report
+        path: merge-coverage-report.txt
+
+  code-coverage-base:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [1.17]
+
+    steps:
+    - name: Git Checkout
+      uses: actions/checkout@v3
+      with:
+        ref: ${{ github.base_ref }}
+
+    - name: Set up go      
+      uses: actions/setup-go@v2
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Install dependencies & build binary
+      run: |
+        go mod init github.com/gusti-adli-tkpd/automated-unit-testing-in-go-via-github-actions
+        go mod tidy
+        go build main/*.go
+        
+    - name: Unit Testing
+      continue-on-error: true
+      run: |
+        go test -coverprofile=cover.out -coverpkg=./... ./... && go tool cover -func=cover.out
+    
+    - name: Create Coverage Report
+      run: |
+        go tool cover -func=cover.out | tee base-coverage-report.txt
+        
+    - name: Write unit test result to GITHUB actions artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: base_coverage_report
+        path: base-coverage-report.txt
+  
+  comparison:
+    runs-on: ubuntu-latest
+    needs: [code-coverage-merge, code-coverage-base]
+    env:
+      THRESHOLD: 100
+      GITHUB_BASE: ${{ github.base_ref }}
+      GITHUB_MERGE: ${{ github.head_ref }}
+
+    steps:
+    - name: Download merge unit test result from GITHUB actions artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: merge_coverage_report
+
+    - name: Download base unit test result from GITHUB actions artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: base_coverage_report
+      
+    - name: Setup Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    - uses: jannekem/run-python-script-action@v1
+      with:
+        script: |
+          from typing import Dict, List, Tuple
+          import re
+          import os
+
+          THRESHOLD = int(os.environ["THRESHOLD"])
+          MERGE_BRANCH = os.environ["GITHUB_MERGE"]
+          BASE_BRANCH = os.environ["GITHUB_BASE"]
+
+
+          def transform_cover_report(report: str) -> Tuple[Dict[str, Dict[str, float]], float]:
+              result = {}
+              for line in report:
+                  full_path, func, coverage = line.split()
+                  if line.startswith("github.com"):
+                      file_name = re.sub(
+                          r"github\.com/tokopedia/data-discovery/go/catalog/([A-Za-z0-9_/]+\.go):[0-9]+:",
+                          r"\g<1>",
+                          full_path.replace(
+                              "github\.com/tokopedia/data-discovery/go/catalog/", ""
+                          ),
+                      )
+                      if result.get(file_name) is None:
+                          result[file_name] = {}
+                      result[file_name][func] = float(coverage.rstrip("%"))
+                  else:
+                      total_coverage = float(coverage.rstrip("%"))
+              return result, total_coverage
+
+
+          def compare_reports(merge: List[str], base: List[str]) -> str:
+              result = ""
+
+              merge_cover_report, merge_total_coverage = transform_cover_report(merge)
+              base_cover_report, base_total_coverage = transform_cover_report(base)
+
+              if (merge_total_coverage == 0 or base_total_coverage == 0) and (
+                  len(merge_cover_report) == 0 or len(base_cover_report) == 0
+              ):
+                  return "**One or more unit tests have failed**. Please fix it !!"
+              else:
+                  status_icon = ":white_check_mark:"
+                  if merge_total_coverage <= THRESHOLD:
+                      status_icon = ":x:"
+
+                  result += "# " + f"{status_icon}" * 3
+                  result += f"\n### PR Total Coverage\n"
+                  result += f"| branch | threshold | coverage | diff to target branch (`{BASE_BRANCH}`) |\n"
+                  result += "|---|---|---|---|\n"
+                  result += f"| target branch: `{BASE_BRANCH}` | {THRESHOLD:.1f} | {base_total_coverage:.1f} | - |\n"
+                  result += f"| current branch: `{MERGE_BRANCH}` | {THRESHOLD:.1f} | {merge_total_coverage:.1f} | {merge_total_coverage-base_total_coverage:.1f} |\n"
+
+                  result += f"\n\n---\n### PR Unit Test Detected Changes Coverage\n"
+
+                  created_and_updated_test_cases = ""
+                  for file_path in merge_cover_report.keys():
+                      for func, coverage in merge_cover_report[file_path].items():
+                          if (
+                              base_coverage := base_cover_report.get(file_path, {}).get(func)
+                          ) is None:
+                              status = ":+1:"
+                              if coverage <= THRESHOLD:
+                                  status = ":-1:"
+                              elif coverage == 100:
+                                  status = ":+1: :+1: :+1:"
+                              created_and_updated_test_cases += f"| `{file_path}` | `{func}` | {coverage:.1f} | - | :new: {status} |\n"
+                          else:
+                              del base_cover_report[file_path][func]
+                              coverage_diff = coverage - base_coverage
+                              if coverage_diff == 0:
+                                  continue
+                              status = ":+1:"
+                              if coverage <= THRESHOLD:
+                                  status = ":-1:"
+                                  if coverage < base_coverage:
+                                      status += " :-1:"
+                              else:
+                                  if coverage == 100:
+                                      status = ":+1: :+1: :+1:"
+                                  elif coverage > base_coverage:
+                                      status = ":+1: :+1"
+                              created_and_updated_test_cases += f"| `{file_path}` | `{func}` | {coverage:.1f} | {coverage_diff:.1f} | {status} |\n"
+
+                  deleted_test_cases = ""
+                  for file_path in base_cover_report.keys():
+                      for func, coverage in base_cover_report[file_path].items():
+                          deleted_test_cases += f"- `{file_path}:{func}`\n"
+
+                  if created_and_updated_test_cases + deleted_test_cases == "":
+                      result += "*NO CHANGES DETECTED*"
+                  else:
+                      if created_and_updated_test_cases != "":
+                          result += (
+                              "<details><summary>Created and Updated test cases</summary>\n\n"
+                          )
+                          result += f"| file | function | coverage | diff to target branch (`{BASE_BRANCH}`) | status |\n"
+                          result += "|---|---|---|---|---|\n"
+                          result += created_and_updated_test_cases
+                          result += "\n\n</details>\n"
+                      if deleted_test_cases != "":
+                          result += "<details><summary>Deleted test cases</summary>\n\n"
+                          result += deleted_test_cases
+                          result += "\n\n</details>\n"
+              result += "\n\n---\n"
+              result += "### Notes\n"
+              result += "Generate a detailed report in your localhost by executing the following commands\n"
+              result += "```sh\n"
+              result += "go test -coverprofile=coverprofile.out ./...\n"
+              result += "go tool cover -html=coverprofile.out\n"
+              result += "```\n"
+              result += "or the following command to cover all packages\n"
+              result += "```sh\n"
+              result += "go test -coverprofile=coverprofile.out -coverpkg=./... ./...\n"
+              result += "go tool cover -html=coverprofile.out\n"
+              result += "```\n"
+
+              return result
+
+
+          def write_markdown_report(result: str) -> None:
+              with open("final-report.md", "w") as f:
+                  f.write(result)
+
+
+          with open("merge-coverage-report.txt", "r") as f:
+              merge_cover_report = f.readlines()
+
+          with open("base-coverage-report.txt", "r") as f:
+              base_cover_report = f.readlines()
+
+          final_report = compare_reports(merge_cover_report, base_cover_report)
+          write_markdown_report(final_report)
+
+
+
+    - name: Comment final report on PR
+      uses: thollander/actions-comment-pull-request@v2
+      with:
+        filePath: final-report.md
+
+      
