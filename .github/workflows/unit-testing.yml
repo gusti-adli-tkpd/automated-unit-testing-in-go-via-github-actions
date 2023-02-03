@@ -37,7 +37,7 @@ jobs:
       run: |
         go mod init github.com/gusti-adli-tkpd/automated-unit-testing-in-go-via-github-actions
         go mod tidy
-        go build main/*.go
+        go build app/*.go
         
     - name: Unit Testing
       continue-on-error: true
@@ -75,7 +75,7 @@ jobs:
       run: |
         go mod init github.com/gusti-adli-tkpd/automated-unit-testing-in-go-via-github-actions
         go mod tidy
-        go build main/*.go
+        go build app/*.go
         
     - name: Unit Testing
       continue-on-error: true
