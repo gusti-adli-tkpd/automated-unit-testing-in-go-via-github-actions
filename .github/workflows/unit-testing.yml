@@ -115,12 +115,15 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
-    - uses: jannekem/run-python-script-action@v1
+    
+    - name: Compare coverage
+      uses: jannekem/run-python-script-action@v1
       with:
         script: |
           from typing import Dict, List, Tuple
           import re
           import os
+          import sys
 
           THRESHOLD = int(os.environ["THRESHOLD"])
           MERGE_BRANCH = os.environ["GITHUB_MERGE"]
@@ -133,7 +136,7 @@ jobs:
                   full_path, func, coverage = line.split()
                   if line.startswith("github.com"):
                       file_name = re.sub(
-                          r"github\.com/tokopedia/data-discovery/go/catalog/([A-Za-z0-9_/]+\.go):[0-9]+:",
+                          r"github\.com/tokopedia/data-discovery/go/catalog/([A-Za-z0-9_/\-]+\.go):[0-9]+:",
                           r"\g<1>",
                           full_path.replace(
                               "github\.com/tokopedia/data-discovery/go/catalog/", ""
@@ -217,7 +220,7 @@ jobs:
                           result += created_and_updated_test_cases
                           result += "\n\n</details>\n"
                       if deleted_test_cases != "":
-                          result += "<details><summary>Deleted test cases</summary>\n\n"
+                          result += "<details><summary>Deleted function(s)</summary>\n\n"
                           result += deleted_test_cases
                           result += "\n\n</details>\n"
               result += "\n\n---\n"
@@ -241,20 +244,28 @@ jobs:
                   f.write(result)
 
 
+          temp_result = ""
           with open("merge-coverage-report.txt", "r") as f:
               merge_cover_report = f.readlines()
+              if merge_cover_report[0] == "total:\t(statements)\t0.0%\n":
+                  temp_result += f"Error while executing current branch ({MERGE_BRANCH}) unit test!!\n"
 
           with open("base-coverage-report.txt", "r") as f:
               base_cover_report = f.readlines()
+              if base_cover_report[0] == "total:\t(statements)\t0.0%\n":
+                  temp_result += F"Error while executing head branch ({BASE_BRANCH}) unit test!!"
+
+          if temp_result != "":
+              write_markdown_report(temp_result)
+              sys.exit()
 
           final_report = compare_reports(merge_cover_report, base_cover_report)
           write_markdown_report(final_report)
-
 
 
     - name: Comment final report on PR
       uses: thollander/actions-comment-pull-request@v2
       with:
         filePath: final-report.md
-
+        GITHUB_TOKEN: ${{ secrets.DC_HEADLESS_GITHUB_PAT }}
       
