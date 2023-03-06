@@ -42,7 +42,7 @@ jobs:
     - name: Unit Testing
       continue-on-error: true
       run: |
-        go test -coverprofile=cover.out -coverpkg=./... ./... && go tool cover -func=cover.out
+        go test -coverprofile=cover.out -coverpkg=./... ./...
     
     - name: Create Coverage Report
       run: |
